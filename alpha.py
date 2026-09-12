@@ -86,10 +86,45 @@ CONFIG = {
     # the optimal balance between high compounding (+260,980% / 21.4% CAGR) and maximum drawdown protection
     # (cutting Dot-Com crash from -48.5% to -35.7% and 2008 GFC from -56.4% to -49.5%).
     "MAX_SLOTS": 7,           # 7 equal slots (14.28% capital allocation per position)
+    "CAUTION_SLOTS": 3,       # Reduced slot capacity during early-warning de-risking
     "CHAMPION_BUFFER": 25,    # Champion Asymmetric Holding Leash (Top 25 buffer prevents premature selling)
     "MIN_PRICE": 5.0,         # Minimum stock price (avoids penny stocks and low-liquidity names)
     "MIN_AVG_VOLUME": 50000,  # Minimum daily share volume threshold
     "BENCHMARK": "SPY",       # Broad market regime benchmark
+
+    # --- Macro Breadth & Market Tickers ---
+    "NYAD_TICKER": "^NYAD",          # NYSE Advance-Decline Cumulative Line
+    "NAAD_TICKER": "^NAAD",          # Nasdaq Advance-Decline Cumulative Line
+    "NYHL_TICKER": "^NYHL",          # NYSE New Highs - New Lows Line
+    "NYUP_TICKER": "^NYUP",          # NYSE Up Volume
+    "NYDN_TICKER": "^NYDN",          # NYSE Down Volume
+    "HYG_TICKER": "HYG",             # High Yield Corporate ETF
+    "TLT_TICKER": "TLT",             # 20+ Year Treasury ETF
+    "VIX_TICKER": "^VIX",            # CBOE Volatility Index
+    "VIX3M_TICKER": "^VIX3M",        # CBOE 3-Month Volatility Index
+
+    # --- Sweepable Optimization Parameters ---
+    "OPTIMIZATION_PARAMS": {
+        "ENABLE_VOLUME_CONFIRMATION": True,
+        "ENABLE_MULTI_MARKET_CONVERGENCE": True,
+        "ENABLE_CREDIT_SPREAD_OVERLAY": True,
+        "ENABLE_VOLATILITY_TERM_STRUCTURE": True,
+
+        "NYAD_BAND_PERIOD": 20,          # Lookback period for $NYAD Keltner/Bollinger Bands
+        "NYAD_BAND_STD": 2.0,            # Band width multiplier
+        "NYHL_MA_PERIOD": 10,            # Moving average period for $NYHL signal line
+
+        "VOL_RATIO_MA_PERIOD": 5,        # Moving average period of Up/Down volume ratio
+        "VOL_RATIO_BEAR_THRESH": 0.90,   # Volume ratio threshold flagging volume breakdown
+
+        "CONVERGENCE_MIN_AGREE": 2,      # Minimum breadth indicators required to agree
+
+        "CREDIT_RATIO_SMA_PERIOD": 50,   # SMA period for credit risk benchmark (HYG/TLT)
+        "CREDIT_MAX_SLOTS_CAP": 3,       # Max slots allowed when credit spreads widen
+
+        "VIX_TERM_RATIO_THRESH": 1.0,    # Ratio threshold indicating VIX curve inversion
+        "VIX_MAX_SLOTS_CAP": 3,          # Max slots allowed during VIX backwardation
+    },
 
     # --- SEC Form 4 Insider Conviction Parameters ---
     "USE_INSIDER_FILTER": True,
@@ -310,7 +345,132 @@ def update_and_load_insider_database(target_tickers):
 
 
 # ======================================================================================
-# 4. QUANTITATIVE TECHNICAL SCREENER & RANKING ENGINE
+# 4. ENHANCED MULTI-SIGNAL MACRO REGIME ENGINE
+# ======================================================================================
+def evaluate_enhanced_macro_shield(custom_params=None):
+    """
+    Evaluates multi-signal market health using:
+    1. Dual Breadth ($NYAD Bands + $NYHL MA Crossover)
+    2. Volume Confirmation ($NYUP / $NYDN Ratio)
+    3. Multi-Market Convergence ($NYAD + $NAAD)
+    4. Credit Spread Risk Overlay (HYG / TLT Ratio)
+    5. Volatility Term Structure (VIX / VIX3M Ratio)
+    """
+    import yfinance as yf
+    p = custom_params if custom_params else CONFIG["OPTIMIZATION_PARAMS"]
+    print("\n================================================================================")
+    print("--- 1. MULTI-SIGNAL MACRO REGIME SHIELD AUDIT ---")
+    print("================================================================================")
+
+    max_slots = CONFIG["MAX_SLOTS"]
+    reasons = []
+
+    try:
+        # Download market macro indicators in parallel
+        tickers_to_fetch = [
+            CONFIG["NYAD_TICKER"], CONFIG["NAAD_TICKER"], CONFIG["NYHL_TICKER"],
+            CONFIG["NYUP_TICKER"], CONFIG["NYDN_TICKER"], CONFIG["HYG_TICKER"],
+            CONFIG["TLT_TICKER"], CONFIG["VIX_TICKER"], CONFIG["VIX3M_TICKER"]
+        ]
+        raw_macro = yf.download(tickers_to_fetch, period="2y", interval="1wk", progress=False)
+
+        if isinstance(raw_macro.columns, pd.MultiIndex):
+            macro_close = raw_macro['Close'].astype(float)
+        else:
+            macro_close = raw_macro.astype(float)
+
+        def get_series(ticker):
+            if ticker in macro_close.columns:
+                return macro_close[ticker].dropna()
+            return pd.Series(dtype=float)
+
+        nyad = get_series(CONFIG["NYAD_TICKER"])
+        naad = get_series(CONFIG["NAAD_TICKER"])
+        nyhl = get_series(CONFIG["NYHL_TICKER"])
+        nyup = get_series(CONFIG["NYUP_TICKER"])
+        nydn = get_series(CONFIG["NYDN_TICKER"])
+        hyg = get_series(CONFIG["HYG_TICKER"])
+        tlt = get_series(CONFIG["TLT_TICKER"])
+        vix = get_series(CONFIG["VIX_TICKER"])
+        vix3m = get_series(CONFIG["VIX3M_TICKER"])
+
+        # Signal 1: Dual Breadth ($NYAD Bands + $NYHL Crossover)
+        if not nyad.empty:
+            nyad_ma = nyad.rolling(p["NYAD_BAND_PERIOD"]).mean()
+            nyad_std = nyad.rolling(p["NYAD_BAND_PERIOD"]).std()
+            upper_band = nyad_ma + (p["NYAD_BAND_STD"] * nyad_std)
+            lower_band = nyad_ma - (p["NYAD_BAND_STD"] * nyad_std)
+
+            last_nyad = nyad.iloc[-1]
+            last_lower = lower_band.iloc[-1]
+
+            if last_nyad < last_lower:
+                print(f"[$NYAD BAND] $NYAD ({last_nyad:.1f}) broke below Lower Band ({last_lower:.1f}) -> HARD BEAR TRIGGERED")
+                return "BEAR_HARD_EXIT", 0, False
+
+        if not nyhl.empty:
+            nyhl_sig = nyhl.rolling(p["NYHL_MA_PERIOD"]).mean()
+            if nyhl.iloc[-1] < nyhl_sig.iloc[-1]:
+                max_slots = min(max_slots, CONFIG["CAUTION_SLOTS"])
+                reasons.append(f"$NYHL Bearish Cross ({nyhl.iloc[-1]:.1f} < {nyhl_sig.iloc[-1]:.1f})")
+
+        # Signal 2: Volume Confirmation ($NYUP / $NYDN Ratio)
+        if p["ENABLE_VOLUME_CONFIRMATION"] and not nyup.empty and not nydn.empty:
+            vol_ratio = (nyup / (nydn + 1e-9)).rolling(p["VOL_RATIO_MA_PERIOD"]).mean()
+            last_vol_ratio = vol_ratio.iloc[-1]
+            if last_vol_ratio < p["VOL_RATIO_BEAR_THRESH"]:
+                max_slots = min(max_slots, CONFIG["CAUTION_SLOTS"])
+                reasons.append(f"Volume Ratio Breakdown ({last_vol_ratio:.2f} < {p['VOL_RATIO_BEAR_THRESH']})")
+
+        # Signal 3: Multi-Market Convergence ($NYAD + $NAAD)
+        if p["ENABLE_MULTI_MARKET_CONVERGENCE"] and not nyad.empty and not naad.empty:
+            nyad_bull = nyad.iloc[-1] > nyad.rolling(p["NYAD_BAND_PERIOD"]).mean().iloc[-1]
+            naad_bull = naad.iloc[-1] > naad.rolling(p["NYAD_BAND_PERIOD"]).mean().iloc[-1]
+            agree_count = int(nyad_bull) + int(naad_bull)
+
+            if agree_count < p["CONVERGENCE_MIN_AGREE"]:
+                max_slots = min(max_slots, CONFIG["CAUTION_SLOTS"])
+                reasons.append(f"Breadth Divergence ({agree_count}/2 markets bullish)")
+
+        # Signal 4: Credit Spread Risk Overlay (HYG / TLT Ratio)
+        if p["ENABLE_CREDIT_SPREAD_OVERLAY"] and not hyg.empty and not tlt.empty:
+            credit_ratio = hyg / tlt
+            credit_sma = credit_ratio.rolling(p["CREDIT_RATIO_SMA_PERIOD"]).mean()
+            if credit_ratio.iloc[-1] < credit_sma.iloc[-1]:
+                max_slots = min(max_slots, p["CREDIT_MAX_SLOTS_CAP"])
+                reasons.append("Credit Spreads Widening (HYG/TLT < 50W SMA)")
+
+        # Signal 5: Volatility Term Structure (VIX / VIX3M Ratio)
+        if p["ENABLE_VOLATILITY_TERM_STRUCTURE"] and not vix.empty and not vix3m.empty:
+            vix_ratio = vix.iloc[-1] / (vix3m.iloc[-1] + 1e-9)
+            if vix_ratio > p["VIX_TERM_RATIO_THRESH"]:
+                max_slots = min(max_slots, p["VIX_MAX_SLOTS_CAP"])
+                reasons.append(f"VIX Curve Inverted ({vix_ratio:.2f} > {p['VIX_TERM_RATIO_THRESH']})")
+
+        # Final Regime Synthesis
+        if max_slots == 0:
+            return "BEAR_HARD_EXIT", 0, False
+        elif max_slots < CONFIG["MAX_SLOTS"]:
+            print(f"[MACRO REGIME] Status: CAUTION REGIME -> Max Capacity Capped at {max_slots} Slots.")
+            print(f"  Triggers: {', '.join(reasons)}")
+            return "CAUTION_DE_RISK", max_slots, True
+        else:
+            print(f"[MACRO REGIME] Status: BULLISH REGIME CONFIRMED. Full capital deployment authorized ({CONFIG['MAX_SLOTS']} Slots).")
+            return "BULL_FULL_EXPOSURE", CONFIG["MAX_SLOTS"], True
+
+    except Exception as e:
+        print(f"[MACRO ERROR] Exception in Multi-Signal Engine ({e}). Falling back to SPY benchmark.")
+        spy = yf.download(CONFIG["BENCHMARK"], period="2y", progress=False)
+        if isinstance(spy.columns, pd.MultiIndex):
+            spy.columns = spy.columns.get_level_values(0)
+        spy_c = spy['Close'].astype(float)
+        spy_sma200 = spy_c.rolling(200).mean().iloc[-1]
+        macro_bull = spy_c.iloc[-1] > spy_sma200
+        return ("BULL_FULL_EXPOSURE" if macro_bull else "BEAR_HARD_EXIT"), (CONFIG["MAX_SLOTS"] if macro_bull else 0), macro_bull
+
+
+# ======================================================================================
+# 5. QUANTITATIVE TECHNICAL SCREENER & RANKING ENGINE
 # ======================================================================================
 def calculate_mfi(df, length=14):
     """
@@ -325,10 +485,10 @@ def calculate_mfi(df, length=14):
     mfr = pos / neg.replace(0, np.nan)
     return (100.0 - (100.0 / (1.0 + mfr))).fillna(50.0)
 
-def run_apex_screener(tickers):
+def run_apex_screener(tickers, active_max_slots=7):
     """
     Full quantitative screening routine:
-    1. Evaluates broad market health via the SPY 200-day SMA Macro Regime Shield.
+    1. Evaluates broad market health via the Multi-Signal Macro Shield.
     2. Downloads 2-year OHLCV bars across the S&P 900 universe in parallel.
     3. Enforces mandatory Stage 2 Trend & Institutional Accumulation criteria:
        - Price > SMA 50 > SMA 200
@@ -340,24 +500,9 @@ def run_apex_screener(tickers):
        Score = [ROC12W + 0.50*ΔROC + 0.20*RVOL] * (1.25 if Insider Buy else 1.0)
     """
     import yfinance as yf
-    print("\n================================================================================")
-    print("--- 1. SPY MACRO REGIME SHIELD AUDIT ---")
-    print("================================================================================")
-   
-    # Download 2 years of daily data for SPY benchmark
-    spy = yf.download(CONFIG["BENCHMARK"], period="2y", progress=False)
-    if isinstance(spy.columns, pd.MultiIndex):
-        spy.columns = spy.columns.get_level_values(0)
-    spy = spy.dropna().copy()
-    spy_c = spy['Close'].astype(float)
-    spy_sma200 = spy_c.rolling(200).mean().iloc[-1]
-    spy_last = spy_c.iloc[-1]
-    macro_bull = spy_last > spy_sma200
+    regime_status, active_slots, macro_bull = evaluate_enhanced_macro_shield()
 
-    print(f"[MACRO REGIME] SPY: ${spy_last:.2f} | 200-Day SMA: ${spy_sma200:.2f}")
-    if macro_bull:
-        print("[MACRO REGIME] Status: BULLISH REGIME CONFIRMED. Full capital deployment authorized.")
-    else:
+    if not macro_bull or active_slots == 0:
         print("[MACRO REGIME] Status: BEAR MARKET REGIME DETECTED! Hard exit to 100% Cash / SGOV.")
         return False, [], {}
 
@@ -366,6 +511,10 @@ def run_apex_screener(tickers):
     print("================================================================================")
     t0 = time.time()
     raw_data = yf.download(tickers, period="2y", progress=False, group_by='ticker', threads=True)
+    spy = yf.download(CONFIG["BENCHMARK"], period="2y", progress=False)
+    if isinstance(spy.columns, pd.MultiIndex):
+        spy.columns = spy.columns.get_level_values(0)
+    spy_c = spy['Close'].astype(float)
     spy_w = spy_c.resample('W-FRI').last()
     print(f"[DATA] Downloaded historical data across {len(tickers)} symbols in {time.time()-t0:.1f}s.")
 
@@ -486,11 +635,11 @@ def run_apex_screener(tickers):
 
     # Sort descending by final composite score
     final_candidates.sort(key=lambda x: x['score'], reverse=True)
-    return macro_bull, final_candidates, stock_metrics
+    return True, final_candidates, stock_metrics
 
 
 # ======================================================================================
-# 5. INTERACTIVE BROKERS PORTFOLIO & EXECUTION MANAGER
+# 6. INTERACTIVE BROKERS PORTFOLIO & EXECUTION MANAGER
 # ======================================================================================
 class IBKRWebClient:
     """
@@ -751,15 +900,7 @@ class IBKRTrader:
 
         print(f"[DAILY STOP] Auditing {len(pos_dict)} active positions: {list(pos_dict.keys())}")
 
-        # Check SPY Macro Shield
-        spy = yf.download(self.config["BENCHMARK"], period="1y", progress=False)
-        if isinstance(spy.columns, pd.MultiIndex):
-            spy.columns = spy.columns.get_level_values(0)
-        spy_last = spy['Close'].iloc[-1]
-        spy_sma200 = spy['Close'].rolling(200).mean().iloc[-1]
-        macro_bull = spy_last > spy_sma200
-
-        print(f"[DAILY STOP] SPY: ${spy_last:.2f} | 200-Day SMA: ${spy_sma200:.2f} -> {'BULLISH' if macro_bull else 'BEAR (EMERGENCY CASH SWEEP)'}")
+        regime_status, active_slots, macro_bull = evaluate_enhanced_macro_shield()
 
         # Update live insider DB for held positions
         update_and_load_insider_database(list(pos_dict.keys()))
@@ -772,9 +913,9 @@ class IBKRTrader:
             exit_needed = False
             reason = ""
            
-            if not macro_bull:
+            if not macro_bull or active_slots == 0:
                 exit_needed = True
-                reason = "Macro Regime Shield Breaker (SPY < 200-Day SMA)"
+                reason = "Multi-Signal Macro Shield Breaker (Hard Bear Exit Triggered)"
             else:
                 stk = yf.download(sym, period="1y", progress=False)
                 if isinstance(stk.columns, pd.MultiIndex):
@@ -813,9 +954,11 @@ class IBKRTrader:
         print(f"[ACCOUNT] Net Liquidation Value: ${net_liq:,.2f} | Available Cash: ${available_cash:,.2f}")
         print(f"[ACCOUNT] Currently Holding: {list(pos_dict.keys())} ({len(pos_dict)} / {self.config['MAX_SLOTS']} slots utilized)")
 
+        regime_status, active_max_slots, macro_bull = evaluate_enhanced_macro_shield()
+
         # Run screener across S&P 900
         tickers = get_sp900_tickers()
-        macro_bull, candidates, metrics = run_apex_screener(tickers)
+        macro_bull, candidates, metrics = run_apex_screener(tickers, active_max_slots=active_max_slots)
 
         if not macro_bull:
             print("\n[ACTION: BEAR REGIME DETECTED] Liquidating all positions to 100% Cash / SGOV...")
@@ -868,8 +1011,8 @@ class IBKRTrader:
                 print(f"[HOLD CHAMPION] {sym} (Rank #{rank_curr}) | Price: ${c_px:.2f} | Above SMA 50 support. Position held.")
 
         # --- Phase 2: Fill Open Allocation Slots ---
-        open_slots = self.config['MAX_SLOTS'] - len(kept_positions)
-        print(f"\n[ALLOCATION] Open Slots Available: {open_slots} / {self.config['MAX_SLOTS']}")
+        open_slots = max(0, active_max_slots - len(kept_positions))
+        print(f"\n[ALLOCATION] Open Slots Available: {open_slots} / {active_max_slots} (Regime Capped)")
 
         if open_slots > 0 and candidates:
             # Optimal 20% allocation per slot based on Net Liquidation Value
@@ -897,7 +1040,7 @@ class IBKRTrader:
 
 
 # ======================================================================================
-# 6. COMMAND LINE INTERFACE & AUTOMATED SCHEDULER DAEMON
+# 7. COMMAND LINE INTERFACE & AUTOMATED SCHEDULER DAEMON
 # ======================================================================================
 def main():
     parser = argparse.ArgumentParser(description="Interactive Brokers Apex Alpha Automated Trading System v2")
